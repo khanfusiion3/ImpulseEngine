@@ -155,7 +155,6 @@ class Vec2 {
     return array;
   }
 }
-
 class Mat2 {
   constructor(a, b, c, d) {
     this.set(a, b, c, d);
@@ -220,12 +219,7 @@ class Mat2 {
     if (typeof v.x === 'number') {
       return this.mul(v.x, v.y, v);
     } else if (v.m00) {
-      return this.set(
-        this.m00 * v.m00 + this.m01 * v.m10,
-        this.m00 * v.m01 + this.m01 * v.m11,
-        this.m10 * v.m00 + this.m11 * v.m10,
-        this.m10 * v.m01 + this.m11 * v.m11
-      );
+      return this.set(this.m00 * v.m00 + this.m01 * v.m10, this.m00 * v.m01 + this.m01 * v.m11, this.m10 * v.m00 + this.m11 * v.m10, this.m10 * v.m01 + this.m11 * v.m11);
     }
   }
   mul(x, y, out) {
@@ -251,7 +245,6 @@ class Mat2 {
     } */
   }
 }
-
 const ImpulseMath = {
   EPSILON: 0.0001,
   BIAS_RELATIVE: 0.95,
@@ -275,7 +268,6 @@ ImpulseMath.EPSILON_SQ = ImpulseMath.EPSILON * ImpulseMath.EPSILON;
 ImpulseMath.RESTING = ImpulseMath.GRAVITY.mul(ImpulseMath.DT).lengthSq() + ImpulseMath.EPSILON;
 ImpulseMath.equal = (a, b) => Math.abs(a - b) <= ImpulseMath.EPSILON;
 ImpulseMath.gt = (a, b) => a >= b * ImpulseMath.BIAS_RELATIVE + a * ImpulseMath.BIAS_ABSOLUTE;
-
 class Body {
   constructor(shape, x, y) {
     this.shape = shape;
@@ -309,20 +301,17 @@ class Body {
     this.shape.setOrient(radians);
   }
 }
-
 const Type = Object.freeze({
   Circle: 0,
   Poly: 1,
   Count: 2
 });
-
 class Shape {
   constructor() {
     this.u = new Mat2();
   }
   setOrient(radians) {}
 }
-
 class Circle extends Shape {
   constructor(r) {
     super();
@@ -345,9 +334,7 @@ class Circle extends Shape {
     return Type.Circle;
   }
 }
-
 const MAX_POLY_VERTEX_COUNT = 64;
-
 class Polygon extends Shape {
   constructor(verts, hh) {
     super();
@@ -483,9 +470,8 @@ class Polygon extends Shape {
     return bestVertex;
   }
 }
-
 const render = (body, ctx) => {
-	ctx.strokeStyle = 'white';
+  ctx.strokeStyle = 'white';
   ctx.beginPath();
   if (body.shape.radius) {
     ctx.arc(body.position.x, body.position.y, body.shape.radius, 0, Math.PI * 2, false);
@@ -504,7 +490,6 @@ const render = (body, ctx) => {
   ctx.closePath();
   ctx.stroke();
 };
-
 const circleCircle = (m, a, b) => {
   const A = a.shape;
   const B = b.shape;
@@ -525,7 +510,6 @@ const circleCircle = (m, a, b) => {
     m.contacts[0] = new Vec2(m.normal).muli(A.radius).addi(a.position);
   }
 };
-
 const circlePolygon = (m, a, b) => {
   const A = a.shape;
   const B = b.shape;
@@ -582,4 +566,210 @@ const circlePolygon = (m, a, b) => {
     m.contacts[0] = new Vec2(a.position).addsi(norm, A.radius);
   }
 };
-
+const polygonPolygon = (m, a, b) => {
+  const A = a.shape;
+  const B = b.shape;
+  // Check for a separating axis with A's face planes
+  const faceA = [0];
+  const penetrationA = findAxisLeastPenetration(faceA, A, B);
+  if (penetrationA >= 0) {
+    return;
+  }
+  // Check for a separating axis with B's face planes
+  const faceB = [0];
+  const penetrationB = findAxisLeastPenetration(faceB, B, A);
+  if (penetrationB >= 0) {
+    return;
+  }
+  let referenceIndex;
+  let flip; // Always point from a to b
+  let RefPoly; // Reference
+  let IncPoly; // Incident
+  // Determine which shape contains reference face
+  if (ImpulseMath.gt(penetrationA, penetrationB)) {
+    RefPoly = A;
+    IncPoly = B;
+    referenceIndex = faceA[0];
+    flip = false;
+  } else {
+    RefPoly = B;
+    IncPoly = A;
+    referenceIndex = faceB[0];
+    flip = true;
+  }
+  // World space incident face
+  const incidentFace = Vec2.arrayOf(2);
+  findIncidentFace(incidentFace, RefPoly, IncPoly, referenceIndex);
+  // y
+  // ^ .n ^
+  // +---c ------posPlane--
+  // x < | i |\
+  // +---+ c-----negPlane--
+  // \ v
+  // r
+  //
+  // r : reference face
+  // i : incident poly
+  // c : clipped point
+  // n : incident normal
+  // Setup reference face vertices
+  let v1 = RefPoly.vertices[referenceIndex];
+  referenceIndex = referenceIndex + 1 == RefPoly.vertices.length ? 0 : referenceIndex + 1;
+  let v2 = RefPoly.vertices[referenceIndex];
+  // Transform vertices to world space
+  // v1 = RefPoly->u * v1 + RefPoly->body->position;
+  // v2 = RefPoly->u * v2 + RefPoly->body->position;
+  v1 = RefPoly.u.mul(v1).addi(RefPoly.body.position);
+  v2 = RefPoly.u.mul(v2).addi(RefPoly.body.position);
+  // Calculate reference face side normal in world space
+  // Vec2 sidePlaneNormal = (v2 - v1);
+  // sidePlaneNormal.Normalize( );
+  const sidePlaneNormal = v2.sub(v1);
+  sidePlaneNormal.normalize();
+  // Orthogonalize
+  // Vec2 refFaceNormal( sidePlaneNormal.y, -sidePlaneNormal.x );
+  const refFaceNormal = new Vec2(sidePlaneNormal.y, -sidePlaneNormal.x);
+  // ax + by = c
+  // c is distance from origin
+  // real refC = Dot( refFaceNormal, v1 );
+  // real negSide = -Dot( sidePlaneNormal, v1 );
+  // real posSide = Dot( sidePlaneNormal, v2 );
+  const refC = refFaceNormal.dot(v1);
+  const negSide = -sidePlaneNormal.dot(v1);
+  const posSide = sidePlaneNormal.dot(v2);
+  // Clip incident face to reference face side planes
+  // if(Clip( -sidePlaneNormal, negSide, incidentFace ) < 2)
+  if (clip(sidePlaneNormal.neg(), negSide, incidentFace) < 2) {
+    return; // Due to floating point error, possible to not have required
+    // points
+  }
+  // if(Clip( sidePlaneNormal, posSide, incidentFace ) < 2)
+  if (clip(sidePlaneNormal, posSide, incidentFace) < 2) {
+    return; // Due to floating point error, possible to not have required
+    // points
+  }
+  // Flip
+  m.normal.set(refFaceNormal);
+  if (flip) {
+    m.normal.negi();
+  }
+  // Keep points behind reference face
+  let cp = 0; // clipped points behind reference face
+  let separation = refFaceNormal.dot(incidentFace[0]) - refC;
+  if (separation <= 0) {
+    m.contacts[cp] = new Vec2(incidentFace[0]);
+    m.penetration = -separation;
+    ++cp;
+  } else {
+    m.penetration = 0;
+  }
+  separation = refFaceNormal.dot(incidentFace[1]) - refC;
+  if (separation <= 0) {
+    m.contacts[cp] = new Vec2(incidentFace[1]);
+    m.penetration -= separation;
+    ++cp;
+    // Average penetration
+    m.penetration /= cp;
+  }
+};
+const findAxisLeastPenetration = (faceIndex, A, B) => {
+  let bestDistance = -Number.MAX_VALUE;
+  let bestIndex = 0;
+  for (let i = 0; i < A.vertices.length; ++i) {
+    // Retrieve a face normal from A
+    // Vec2 n = A->m_normals[i];
+    // Vec2 nw = A->u * n;
+    let nw = A.u.mul(A.normals[i]);
+    // Transform face normal into B's model space
+    // Mat2 buT = B->u.Transpose( );
+    // n = buT * nw;
+    let buT = B.u.transpose();
+    let n = buT.mul(nw);
+    // Retrieve support point from B along -n
+    // Vec2 s = B->GetSupport( -n );
+    let s = B.getSupport(n.neg());
+    // Retrieve vertex on face from A, transform into
+    // B's model space
+    // Vec2 v = A->m_vertices[i];
+    // v = A->u * v + A->body->position;
+    // v -= B->body->position;
+    // v = buT * v;
+    let v = buT.muli(A.u.mul(A.vertices[i]).addi(A.body.position).subi(B.body.position));
+    // Compute penetration distance (in B's model space)
+    // real d = Dot( n, s - v );
+    let d = n.dot(s.sub(v));
+    // Store greatest distance
+    if (d > bestDistance) {
+      bestDistance = d;
+      bestIndex = i;
+    }
+  }
+  faceIndex[0] = bestIndex;
+  return bestDistance;
+};
+const findIncidentFace = (v, RefPoly, IncPoly, referenceIndex) => {
+  let referenceNormal = RefPoly.normals[referenceIndex];
+  // Calculate normal in incident's frame of reference
+  // referenceNormal = RefPoly->u * referenceNormal; // To world space
+  // referenceNormal = IncPoly->u.Transpose( ) * referenceNormal; // To
+  // incident's model space
+  referenceNormal = RefPoly.u.mul(referenceNormal); // To world space
+  referenceNormal = IncPoly.u.transpose().mul(referenceNormal); // To
+  // incident's
+  // model
+  // space
+  // Find most anti-normal face on incident polygon
+  let incidentFace = 0;
+  let minDot = Number.MAX_VALUE;
+  for (let i = 0; i < IncPoly.vertices.length; ++i) {
+    // real dot = Dot( referenceNormal, IncPoly->m_normals[i] );
+    let dot = referenceNormal.dot(IncPoly.normals[i]);
+    if (dot < minDot) {
+      minDot = dot;
+      incidentFace = i;
+    }
+  }
+  // Assign face vertices for incidentFace
+  // v[0] = IncPoly->u * IncPoly->m_vertices[incidentFace] +
+  // IncPoly->body->position;
+  // incidentFace = incidentFace + 1 >= (int32)IncPoly->m_vertexCount ? 0 :
+  // incidentFace + 1;
+  // v[1] = IncPoly->u * IncPoly->m_vertices[incidentFace] +
+  // IncPoly->body->position;
+  v[0] = IncPoly.u.mul(IncPoly.vertices[incidentFace]).addi(IncPoly.body.position);
+  incidentFace = incidentFace + 1 >= IncPoly.vertices.length ? 0 : incidentFace + 1;
+  v[1] = IncPoly.u.mul(IncPoly.vertices[incidentFace]).addi(IncPoly.body.position);
+};
+const clip = (n, c, face) => {
+  let sp = 0;
+  const out = [
+    new Vec2(face[0]),
+    new Vec2(face[1])
+  ];
+  // Retrieve distances from each endpoint to the line
+  // d = ax + by - c
+  // real d1 = Dot( n, face[0] ) - c;
+  // real d2 = Dot( n, face[1] ) - c;
+  const d1 = n.dot(face[0]) - c;
+  const d2 = n.dot(face[1]) - c;
+  // If negative (behind plane) clip
+  // if(d1 <= 0.0f) out[sp++] = face[0];
+  // if(d2 <= 0.0f) out[sp++] = face[1];
+  if (d1 <= 0) out[sp++].set(face[0]);
+  if (d2 <= 0) out[sp++].set(face[1]);
+  // If the points are on different sides of the plane
+  if (d1 * d2 < 0) // less than to ignore -0.0f
+  {
+    // Push intersection point
+    // real alpha = d1 / (d1 - d2);
+    // out[sp] = face[0] + alpha * (face[1] - face[0]);
+    // ++sp;
+    const alpha = d1 / (d1 - d2);
+    out[sp++] = new Vec2(face[1]).subi(face[0]).muli(alpha).addi(face[0]);
+  }
+  // Assign our new converted values
+  face[0] = out[0];
+  face[1] = out[1];
+  // assert( sp != 3 );
+  return sp;
+};
